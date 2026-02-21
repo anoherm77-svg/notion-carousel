@@ -1,0 +1,13 @@
+{
+  "name": "notion-carousel",
+  "private": true,
+  "scripts": {
+    "start": "concurrently -n server,client -c blue,green \"npm run start:server\" \"npm run start:client\"",
+    "start:server": "npm run start --prefix server",
+    "start:client": "npm run dev --prefix client",
+    "install:all": "npm install && npm install --prefix server && npm install --prefix client"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

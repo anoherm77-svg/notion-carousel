@@ -1,7 +1,60 @@
 import { useState, useEffect, useRef } from 'react';
-import { getMe, getAuthUrl, disconnect, getChildPages, getPageBlocks, getProxyImageUrl } from './api';
+import { getMe, getAuthUrl, disconnect, getDatabases, getDatabasePages, getChildPages, getPageBlocks, getProxyImageUrl } from './api';
 import { Slide } from './Slide';
+import { StyleSettingsPanel } from './StyleSettingsPanel';
 import html2canvas from 'html2canvas';
+
+const DEFAULT_STYLE_CONFIG = {
+  paddingTop: 100,
+  paddingBottom: 100,
+  paddingLeft: 100,
+  paddingRight: 100,
+  bgColor: '#FFFFFF',
+  bgRgbInput: '255,255,255',
+  textColor: '#37352F',
+  fontFamily: 'Inter, sans-serif',
+  heading1Size: 72,
+  heading2Size: 56,
+  heading3Size: 44,
+  headingWeight: 600,
+  headingLineHeight: 1.3,
+  bodySize: 44,
+  bodyWeight: 400,
+  bodyLineHeight: 1.6,
+  heading1Spacing: 36,
+  heading2Spacing: 28,
+  heading3Spacing: 24,
+  bodySpacing: 20,
+  bulletSize: 14,
+  bulletDotMarginTop: 28,
+  nestedIndent: 66,
+  nestedSpacing: 16,
+  nestedGap: 22,
+  listGap: 20,
+  numberGap: 22,
+  numberIndexWidth: 36,
+  dividerColor: '#D3D1CB',
+  dividerSpacingTop: 16,
+  dividerSpacingBottom: 24,
+  quoteBorderWidth: 5,
+  quotePaddingLeft: 24,
+  quoteSpacing: 28,
+  calloutBorderRadius: 12,
+  calloutPadding: 24,
+  calloutGap: 16,
+  calloutSpacing: 28,
+  calloutIconSize: 40,
+  calloutBgColor: '#F7F6F3',
+  codeSize: 38,
+  codeBgColor: '#F7F6F3',
+  codePadding: '4px 8px',
+  codeBorderRadius: 4,
+  columnsGap: 16,
+  columnsSpacing: 28,
+  imageWrapSpacing: 28,
+  maxImageHeight: 600,
+  borderRadius: 0,
+};
 
 const SUPPORTED_TYPES = new Set([
   'heading_1',
@@ -45,12 +98,21 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [databases, setDatabases] = useState([]);
+  const [selectedDatabaseId, setSelectedDatabaseId] = useState('');
+  const [databasePages, setDatabasePages] = useState([]);
+  const [loadingDatabases, setLoadingDatabases] = useState(false);
+  const [loadingPages, setLoadingPages] = useState(false);
   const [parentUrl, setParentUrl] = useState('');
   const [subpages, setSubpages] = useState([]);
   const [slides, setSlides] = useState([]);
   const [loadingSlides, setLoadingSlides] = useState(false);
   const [downloadStatus, setDownloadStatus] = useState(null);
-  const [bgRgb, setBgRgb] = useState('255,255,255'); // R,G,B
+  const [refreshingIndex, setRefreshingIndex] = useState(null);
+  const [styleConfig, setStyleConfig] = useState({ ...DEFAULT_STYLE_CONFIG });
+  const [stylePanelOpen, setStylePanelOpen] = useState(false);
+  const [view, setView] = useState('list'); // 'list' | 'carousel'
+  const [exportingIndex, setExportingIndex] = useState(null); // 声明以避免 ReferenceError（导出方案 1 已移除，保留兼容）
   const carouselRef = useRef(null);
   const slideRefs = useRef([]);
 
@@ -72,12 +134,56 @@ export default function App() {
       .finally(() => setLoading(false));
   }, []);
 
+  // 连接后自动拉取数据库列表
+  useEffect(() => {
+    if (!connected) return;
+    setLoadingDatabases(true);
+    setError(null);
+    getDatabases()
+      .then((data) => {
+        setDatabases(data.databases || []);
+        setSelectedDatabaseId('');
+        setDatabasePages([]);
+      })
+      .catch((err) => setError(err.message || '获取数据库列表失败'))
+      .finally(() => setLoadingDatabases(false));
+  }, [connected]);
+
+  // 选择数据库后拉取页面列表
+  useEffect(() => {
+    if (!selectedDatabaseId) {
+      setDatabasePages([]);
+      return;
+    }
+    setLoadingPages(true);
+    setError(null);
+    getDatabasePages(selectedDatabaseId)
+      .then((data) => {
+        setDatabasePages(data.pages || []);
+      })
+      .catch((err) => setError(err.message || '获取页面列表失败'))
+      .finally(() => setLoadingPages(false));
+  }, [selectedDatabaseId]);
+
   // Scroll carousel to start when slides are loaded
   useEffect(() => {
     if (slides.length > 0 && carouselRef.current) {
       carouselRef.current.scrollLeft = 0;
     }
   }, [slides]);
+
+  // Load Noto Sans SC from Google Fonts when selected
+  useEffect(() => {
+    const fontFamily = styleConfig.fontFamily || '';
+    if (!fontFamily.includes('Noto Sans SC')) return;
+    let link = document.getElementById('font-noto-sans-sc');
+    if (link) return;
+    link = document.createElement('link');
+    link.id = 'font-noto-sans-sc';
+    link.rel = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;600;700&display=swap';
+    document.head.appendChild(link);
+  }, [styleConfig.fontFamily]);
 
   const handleConnect = () => {
     window.location.href = getAuthUrl();
@@ -87,6 +193,36 @@ export default function App() {
     disconnect()
       .then(() => setConnected(false))
       .catch(() => {});
+  };
+
+  const handleOpenPageFromDatabase = async (page) => {
+    setError(null);
+    setLoadingSlides(true);
+    setSlides([]);
+    try {
+      const { children } = await getChildPages(page.id);
+      if (children && children.length > 0) {
+        setSubpages(children);
+        const blocksList = [];
+        for (const child of children) {
+          const { blocks } = await getPageBlocks(child.id);
+          blocksList.push({ page: child, blocks: filterBlocks(blocks) });
+        }
+        setSlides(blocksList);
+      } else {
+        const { blocks } = await getPageBlocks(page.id);
+        setSubpages([{ id: page.id, title: page.title }]);
+        setSlides([{ page: { id: page.id, title: page.title }, blocks: filterBlocks(blocks) }]);
+      }
+      setTimeout(() => {
+        if (carouselRef.current) carouselRef.current.scrollLeft = 0;
+      }, 100);
+      setView('carousel');
+    } catch (err) {
+      setError(err.message || '加载页面失败');
+    } finally {
+      setLoadingSlides(false);
+    }
   };
 
   const handleLoadSubpages = async () => {
@@ -110,12 +246,10 @@ export default function App() {
         blocksList.push({ page, blocks: filterBlocks(blocks) });
       }
       setSlides(blocksList);
-      // Scroll to start when slides are loaded
       setTimeout(() => {
-        if (carouselRef.current) {
-          carouselRef.current.scrollLeft = 0;
-        }
+        if (carouselRef.current) carouselRef.current.scrollLeft = 0;
       }, 100);
+      setView('carousel');
     } catch (err) {
       setError(err.message || '加载失败');
     } finally {
@@ -123,27 +257,78 @@ export default function App() {
     }
   };
 
+  const getExportOptions = () => ({
+    width: 1080,
+    height: 1350,
+    scale: 1,
+    useCORS: true,
+    allowTaint: true,
+    backgroundColor: styleConfig.bgColor,
+    logging: false,
+    windowWidth: 1080,
+    windowHeight: 1350,
+    onclone: (clonedDoc, clonedEl) => {
+      clonedEl.style.transform = 'none';
+      clonedEl.style.width = '1080px';
+      clonedEl.style.height = '1350px';
+      let parent = clonedEl.parentElement;
+      while (parent && parent !== clonedDoc.body) {
+        parent.style.transform = 'none';
+        parent.style.width = 'auto';
+        parent.style.height = 'auto';
+        parent.style.overflow = 'visible';
+        parent = parent.parentElement;
+      }
+    },
+  });
+
+  const handleRefreshSlide = async (index) => {
+    const slide = slides[index];
+    if (!slide?.page?.id) return;
+    setRefreshingIndex(index);
+    setError(null);
+    try {
+      const { blocks } = await getPageBlocks(slide.page.id);
+      setSlides((prev) =>
+        prev.map((s, j) => (j === index ? { ...s, blocks: filterBlocks(blocks) } : s))
+      );
+    } catch (err) {
+      setError('刷新失败: ' + (err.message || '未知错误'));
+    } finally {
+      setRefreshingIndex(null);
+    }
+  };
+
+  const handleDownloadOne = async (index) => {
+    const el = slideRefs.current[index];
+    if (!el) return;
+    setDownloadStatus(`正在导出第 ${index + 1} 张…`);
+    try {
+      const canvas = await html2canvas(el, getExportOptions());
+      const indexName = String(index + 1).padStart(2, '0');
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = `${indexName}.jpg`;
+      a.click();
+      setDownloadStatus('已下载');
+      setTimeout(() => setDownloadStatus(null), 1500);
+    } catch (err) {
+      setDownloadStatus(null);
+      setError('导出失败: ' + (err.message || '未知错误'));
+    }
+  };
+
   const handleDownloadAll = async () => {
     if (slides.length === 0) return;
     setDownloadStatus('正在生成图片…');
-    // Scale factor: 1080/400 = 2.7 (to get full resolution from scaled preview)
-    const exportScale = 1080 / 400;
-    const bgColor = parseRgbString(bgRgb);
-    const options = {
-      scale: exportScale,
-      useCORS: true,
-      allowTaint: true,
-      backgroundColor: bgColor,
-      logging: false,
-    };
     try {
       for (let i = 0; i < slideRefs.current.length; i++) {
         const el = slideRefs.current[i];
         if (!el) continue;
         setDownloadStatus(`正在导出 ${i + 1}/${slides.length}…`);
-        const canvas = await html2canvas(el, options);
+        const canvas = await html2canvas(el, getExportOptions());
         const indexName = String(i + 1).padStart(2, '0');
-        // 只导出 JPG
         const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
         const a = document.createElement('a');
         a.href = dataUrl;
@@ -159,7 +344,7 @@ export default function App() {
   };
 
   if (loading) {
-    return (
+  return (
       <div style={styles.center}>
         <p>加载中…</p>
       </div>
@@ -182,15 +367,77 @@ export default function App() {
   return (
     <div style={styles.app}>
       <header style={styles.header}>
+        {view === 'carousel' && slides.length > 0 ? (
+          <button type="button" onClick={() => setView('list')} style={styles.textBtn}>
+            ← 返回
+          </button>
+        ) : (
+          <span style={{ width: 48 }} />
+        )}
         <h1 style={styles.appTitle}>Notion Carousel</h1>
         <button type="button" onClick={handleDisconnect} style={styles.textBtn}>
           断开 Notion
         </button>
       </header>
 
+      {view !== 'carousel' && (
+      <>
+      <section style={styles.section}>
+        <label style={styles.label}>从数据库选择页面</label>
+        <div style={styles.inputRow}>
+          <select
+            value={selectedDatabaseId}
+            onChange={(e) => setSelectedDatabaseId(e.target.value)}
+            disabled={loadingDatabases}
+            style={{ ...styles.input, flex: 1, maxWidth: 400 }}
+          >
+            <option value="">
+              {loadingDatabases ? '加载数据库中…' : '选择数据库'}
+            </option>
+            {databases.map((db) => (
+              <option key={db.id} value={db.id}>
+                {db.title || 'Untitled'}
+              </option>
+            ))}
+          </select>
+        </div>
+        {!loadingDatabases && databases.length === 0 && !error && (
+          <p style={styles.hint}>
+            未找到数据库。请在 Notion 中打开要使用的数据库，点击右上角「···」→「连接」→ 选择本应用并添加。
+          </p>
+        )}
+        {selectedDatabaseId && (
+          <div style={styles.pageList}>
+            {loadingPages ? (
+              <p style={styles.hint}>加载页面列表中…</p>
+            ) : databasePages.length === 0 ? (
+              <p style={styles.hint}>该数据库下暂无页面，或暂无权限。</p>
+            ) : (
+              <>
+                <p style={styles.label}>点击页面进入编辑 / 导出：</p>
+                <ul style={styles.pageListUl}>
+                  {databasePages.map((page) => (
+                    <li key={page.id} style={styles.pageListItem}>
+                      <button
+                        type="button"
+                        style={styles.pageListBtn}
+                        onClick={() => handleOpenPageFromDatabase(page)}
+                        disabled={loadingSlides}
+                      >
+                        {page.title || 'Untitled'}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        )}
+      </section>
+
       <section style={styles.section}>
         <label style={styles.label}>
-          父页面 URL（包含子页面的 Notion 页面链接）
+          或：父页面 URL（包含子页面的 Notion 页面链接）
         </label>
         <div style={styles.inputRow}>
           <input
@@ -212,28 +459,35 @@ export default function App() {
         {error && <p style={styles.errorMsg}>{error}</p>}
       </section>
 
+      {connected && subpages.length === 0 && !loadingSlides && parentUrl && (
+        <p style={styles.hint}>该页面下没有子页面，或暂无权限访问。</p>
+      )}
+      </>
+      )}
+
       {slides.length > 0 && (
         <>
           <section style={styles.section}>
             <div style={styles.carouselHeader}>
               <span>共 {slides.length} 张幻灯片</span>
-              <div style={styles.bgControl}>
-                <span style={styles.bgLabel}>背景 RGB</span>
-                <input
-                  type="text"
-                  value={bgRgb}
-                  onChange={(e) => setBgRgb(e.target.value)}
-                  placeholder="255,255,255"
-                  style={styles.bgInput}
-                />
+              <div style={styles.carouselActions}>
+                <button
+                  type="button"
+                  onClick={() => setStylePanelOpen(true)}
+                  style={styles.gearBtn}
+                  title="样式设置"
+                  aria-label="样式设置"
+                >
+                  ⚙️
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadAll}
+                  style={styles.primaryBtn}
+                >
+                  Download All
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={handleDownloadAll}
-                style={styles.primaryBtn}
-              >
-                Download All
-              </button>
             </div>
             {downloadStatus && <p style={styles.status}>{downloadStatus}</p>}
             <div ref={carouselRef} style={styles.carousel}>
@@ -244,13 +498,31 @@ export default function App() {
                       <Slide
                         blocks={blocks}
                         getProxyImageUrl={getProxyImageUrl}
-                        backgroundColor={parseRgbString(bgRgb)}
+                        styleConfig={styleConfig}
                       />
                     </div>
                   </div>
                   <div style={styles.slideInfo}>
                     <p style={styles.slideNumber}>{i + 1}/{slides.length}</p>
                     <p style={styles.slideLabel}>{page.title}</p>
+                    <div style={styles.slideActions}>
+                      <button
+                        type="button"
+                        onClick={() => handleRefreshSlide(i)}
+                        disabled={refreshingIndex === i}
+                        style={styles.refreshOneBtn}
+                        title="从 Notion 重新拉取本页内容"
+                      >
+                        {refreshingIndex === i ? '刷新中…' : '刷新'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadOne(i)}
+                        style={styles.downloadOneBtn}
+                      >
+                        下载
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -259,9 +531,13 @@ export default function App() {
         </>
       )}
 
-      {connected && subpages.length === 0 && !loadingSlides && parentUrl && (
-        <p style={styles.hint}>该页面下没有子页面，或暂无权限访问。</p>
-      )}
+      <StyleSettingsPanel
+        open={stylePanelOpen}
+        onClose={() => setStylePanelOpen(false)}
+        styleConfig={styleConfig}
+        setStyleConfig={setStyleConfig}
+        defaultStyleConfig={DEFAULT_STYLE_CONFIG}
+      />
     </div>
   );
 }
@@ -357,25 +633,22 @@ const styles = {
     justifyContent: 'space-between',
     marginBottom: 16,
   },
+  carouselActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+  },
+  gearBtn: {
+    background: 'none',
+    border: 'none',
+    fontSize: 20,
+    cursor: 'pointer',
+    padding: 4,
+    lineHeight: 1,
+  },
   status: {
     marginBottom: 12,
     color: '#666',
-  },
-  bgControl: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-  },
-  bgLabel: {
-    fontSize: 12,
-    color: '#666',
-  },
-  bgInput: {
-    width: 90,
-    fontSize: 12,
-    padding: '4px 6px',
-    borderRadius: 4,
-    border: '1px solid #ccc',
   },
   carousel: {
     display: 'flex',
@@ -429,9 +702,61 @@ const styles = {
     textAlign: 'center',
     wordBreak: 'break-word',
   },
+  slideActions: {
+    marginTop: 8,
+    display: 'flex',
+    gap: 8,
+    justifyContent: 'center',
+  },
+  refreshOneBtn: {
+    padding: '6px 12px',
+    fontSize: 13,
+    backgroundColor: '#fff',
+    color: '#1a1a1a',
+    border: '1px solid #ccc',
+    borderRadius: 6,
+    cursor: 'pointer',
+  },
+  downloadOneBtn: {
+    padding: '6px 12px',
+    fontSize: 13,
+    backgroundColor: '#fff',
+    color: '#1a1a1a',
+    border: '1px solid #ccc',
+    borderRadius: 6,
+    cursor: 'pointer',
+  },
   hint: {
     textAlign: 'center',
     color: '#666',
     padding: 24,
+  },
+  pageList: {
+    marginTop: 12,
+  },
+  pageListUl: {
+    listStyle: 'none',
+    padding: 0,
+    margin: '8px 0 0',
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  pageListItem: {
+    margin: 0,
+  },
+  pageListBtn: {
+    padding: '8px 14px',
+    fontSize: 14,
+    backgroundColor: '#fff',
+    color: '#1a1a1a',
+    border: '1px solid #ccc',
+    borderRadius: 8,
+    cursor: 'pointer',
+    textAlign: 'left',
+    maxWidth: 320,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
   },
 };

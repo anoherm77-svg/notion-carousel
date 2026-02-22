@@ -94,6 +94,98 @@ router.get('/proxy-image', async (req, res) => {
   }
 });
 
+// 从 Notion 富文本数组取纯文本
+function richTextToPlain(richText) {
+  if (!Array.isArray(richText)) return '';
+  return richText.map((t) => t.plain_text || '').join('');
+}
+
+// 从 database 对象取标题（2022-06-28 中 database 有 title 数组）
+function getDatabaseTitle(db) {
+  if (db.title && Array.isArray(db.title)) return richTextToPlain(db.title);
+  return 'Untitled Database';
+}
+
+// 从 query 返回的 page 的 properties 中取第一个 title 类型属性作为页面标题
+function getPageTitleFromProperties(properties) {
+  if (!properties || typeof properties !== 'object') return 'Untitled';
+  for (const key of Object.keys(properties)) {
+    const prop = properties[key];
+    if (prop && prop.type === 'title' && Array.isArray(prop.title)) {
+      return richTextToPlain(prop.title);
+    }
+  }
+  return 'Untitled';
+}
+
+// 搜索当前连接有权限的数据库（仅返回 database 类型）
+// 不传 filter，避免部分 Notion 版本返回 400/404，在服务端只保留 object === 'database'
+router.get('/search-databases', async (req, res) => {
+  try {
+    const all = [];
+    let cursor = undefined;
+    do {
+      const resp = await req.notion.search({
+        page_size: 100,
+        start_cursor: cursor,
+      });
+      const results = resp.results || [];
+      for (const r of results) {
+        if (r.object === 'database') {
+          all.push({
+            id: r.id,
+            title: getDatabaseTitle(r),
+          });
+        }
+      }
+      cursor = resp.next_cursor ?? undefined;
+    } while (cursor);
+    res.json({ databases: all });
+  } catch (err) {
+    const code = err.code || err.status;
+    const status = code === 'object_not_found' || code === 404 ? 404 : err.status || 500;
+    const message =
+      status === 404
+        ? '无法获取数据库列表。请确保已在 Notion 中把需要的数据库「添加连接」到本应用（数据库页面右上角 ··· → 连接 → 选择本应用）。'
+        : (err.message || 'Notion API error');
+    res.status(status).json({ error: message });
+  }
+});
+
+// 查询指定数据库中的页面列表（分页，返回 id + 标题）
+router.get('/databases/:databaseId/pages', async (req, res) => {
+  const databaseId = parsePageId(req.params.databaseId);
+  if (!databaseId) {
+    return res.status(400).json({ error: 'Invalid database ID or URL' });
+  }
+  try {
+    const pages = [];
+    let cursor = undefined;
+    do {
+      const resp = await req.notion.databases.query({
+        database_id: databaseId,
+        page_size: 100,
+        start_cursor: cursor,
+      });
+      const results = resp.results || [];
+      for (const p of results) {
+        if (p.object === 'page') {
+          pages.push({
+            id: p.id,
+            title: getPageTitleFromProperties(p.properties),
+            url: p.url || undefined,
+          });
+        }
+      }
+      cursor = resp.next_cursor ?? undefined;
+    } while (cursor);
+    res.json({ pages });
+  } catch (err) {
+    const status = err.code === 'object_not_found' ? 404 : err.status || 500;
+    res.status(status).json({ error: err.message || 'Notion API error' });
+  }
+});
+
 router.get('/children', async (req, res) => {
   const pageIdOrUrl = req.query.pageIdOrUrl;
   if (!pageIdOrUrl || typeof pageIdOrUrl !== 'string') {
